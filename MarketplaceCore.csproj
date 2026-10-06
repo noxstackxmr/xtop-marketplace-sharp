@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <DefaultItemExcludes>$(DefaultItemExcludes);Tests/**;Native/**;Client/**</DefaultItemExcludes>
+    <NativeRuntimeIdentifier Condition="'$(RuntimeIdentifier)' != ''">$(RuntimeIdentifier)</NativeRuntimeIdentifier>
+    <NativeRuntimeIdentifier Condition="'$(NativeRuntimeIdentifier)' == ''">$(NETCoreSdkRuntimeIdentifier)</NativeRuntimeIdentifier>
+    <NativeLibraryFile Condition="'$(NativeRuntimeIdentifier)' == 'win-x64'">xtop_monero.dll</NativeLibraryFile>
+    <NativeLibraryFile Condition="'$(NativeRuntimeIdentifier)' == 'linux-x64'">libxtop_monero.so</NativeLibraryFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Include="Native/build/$(NativeLibraryFile)" Link="$(NativeLibraryFile)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Include="Native/vendor/monero/LICENSE" Link="licenses/monero/LICENSE" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="LICENSE" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <Target Name="CheckNativeLibrary" BeforeTargets="PrepareForBuild" Condition="'$(DesignTimeBuild)' != 'true'">
+    <Error Condition="'$(NativeLibraryFile)' == ''" Text="Native verification supports win-x64 and linux-x64" />
+    <Error Condition="!Exists('$(MSBuildProjectDirectory)/Native/build/$(NativeLibraryFile)')" Text="Build the native library using Native/build.ps1 or Native/build-linux.sh" />
+  </Target>
+</Project>

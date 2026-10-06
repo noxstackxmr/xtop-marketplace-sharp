@@ -1,0 +1,9 @@
+bin/
+obj/
+.idea/
+appsettings.json
+appsettings.*.local.json
+Native/build/
+Native/tools/
+Native/cache/
+Tests

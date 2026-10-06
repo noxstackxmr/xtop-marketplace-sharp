@@ -1,0 +1,57 @@
+{
+  "repository": "https://github.com/monero-project/monero",
+  "version": "v0.18.5.1",
+  "commit": "4f92268d7c16741cfb41e5bbe2aa46cc260a9ea5",
+  "files": [
+    {
+      "path": "src/crypto/crypto-ops.c",
+      "file": "crypto-ops.c",
+      "sha256": "eaae64573d4fb2dfd976eea629423fcfdc637fe59def48e7ef272d36fe1968f1"
+    },
+    {
+      "path": "src/crypto/crypto-ops.h",
+      "file": "crypto-ops.h",
+      "sha256": "076d877952d6aea1b0191b25850ca878d307cf0c1a812f8a38f1a0cc68731dbb"
+    },
+    {
+      "path": "src/crypto/crypto-ops-data.c",
+      "file": "crypto-ops-data.c",
+      "sha256": "13c85018e9d2c6ec36aba625c4a7693f4267e403b6e50a2b27ece0e4f66c298d"
+    },
+    {
+      "path": "src/crypto/hash.c",
+      "file": "hash.c",
+      "sha256": "955cd6bc5f83ed6e6d5a2a657afb673d3de5bad3aa54f3db3c2a30097af7381a"
+    },
+    {
+      "path": "src/crypto/hash-ops.h",
+      "file": "hash-ops.h",
+      "sha256": "2a78720488efa9529f64c30a21ad259f986bb33c2caf5bf620297e433f9b92ab"
+    },
+    {
+      "path": "src/crypto/keccak.c",
+      "file": "keccak.c",
+      "sha256": "1fbfb9d4c857dab9f80ad2b6019e146ae64e8d1856ffdc5d03f66275c47ae5ca"
+    },
+    {
+      "path": "src/crypto/keccak.h",
+      "file": "keccak.h",
+      "sha256": "dde2bdb591a893b8ca5890b7e3d5be906812d4b3977e9006b5434e1cf35d3be7"
+    },
+    {
+      "path": "contrib/epee/include/warnings.h",
+      "file": "warnings.h",
+      "sha256": "71cdaae185b836c44b05cdd15f9c4266dc600479cda2902c507460fa46405072"
+    },
+    {
+      "path": "contrib/epee/include/int-util.h",
+      "file": "int-util.h",
+      "sha256": "6d30dfce132862c59345f099d92c1478a4a0882eb289b57d45345eb0b7d040bd"
+    },
+    {
+      "path": "LICENSE",
+      "file": "LICENSE",
+      "sha256": "c2fe351163f4e0cee45d38e9481f2ea60f3cb77b24f818c4a2c740383f2f4cb2"
+    }
+  ]
+}
