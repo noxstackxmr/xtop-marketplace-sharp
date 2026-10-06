@@ -1,6 +1,6 @@
 # MarketplaceCore
 
-Encrypted communication relay for XTOP client sales.
+Marketplace for the XMR Token Overlay Protocol. Client communications, notifications, market-based operations.
 
 .NET 10. Copy `appsettings.example.json` to `appsettings.json` and set the marketplace, indexer URL, public HTTPS origin and allowed browser origins.
 
