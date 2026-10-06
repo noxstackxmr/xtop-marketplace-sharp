@@ -1,10 +1,12 @@
 using System.Threading.RateLimiting;
+using System.Net;
 using MarketplaceCore.Crypto;
 using MarketplaceCore.Hubs;
 using MarketplaceCore.Options;
 using MarketplaceCore.Services.Channels;
 using MarketplaceCore.Services.Indexer;
 using Microsoft.AspNetCore.Http.Connections;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Options;
@@ -65,6 +67,19 @@ public static class MarketplaceApplication
         if (!OwnerSignature.IsOwner("5866666666666666666666666666666666666666666666666666666666666666"))
             throw new InvalidOperationException("native signature verification unavailable");
         app.UseExceptionHandler();
+        if (marketplace.TrustLoopbackProxy)
+        {
+            var forwarding = new ForwardedHeadersOptions
+            {
+                ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto,
+                ForwardLimit = 1
+            };
+            forwarding.KnownIPNetworks.Clear();
+            forwarding.KnownProxies.Clear();
+            forwarding.KnownProxies.Add(IPAddress.Loopback);
+            forwarding.KnownProxies.Add(IPAddress.IPv6Loopback);
+            app.UseForwardedHeaders(forwarding);
+        }
         app.Use(async (context, next) =>
         {
             if (!context.Request.IsHttps && !app.Environment.IsDevelopment())

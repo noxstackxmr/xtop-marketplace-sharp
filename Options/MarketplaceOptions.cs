@@ -9,6 +9,7 @@ public sealed class MarketplaceOptions
     [Required] public string PublicOrigin { get; set; } = "";
     [Required] public string IndexerUrl { get; set; } = "";
     public string[] AllowedOrigins { get; set; } = [];
+    public bool TrustLoopbackProxy { get; set; }
     [Range(1, 60)] public int RequestTimeoutSeconds { get; set; } = 15;
     public byte NetworkId => Network switch
     {
