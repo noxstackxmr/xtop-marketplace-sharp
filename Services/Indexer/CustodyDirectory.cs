@@ -20,13 +20,17 @@ public sealed class CustodyDirectory(HttpClient http, IOptions<MarketplaceOption
     {
         OwnerSignature.Hex(reference, 32); OwnerSignature.Hex(configHash, 32);
         if (operation is not ("list" or "cancel" or "purchase")) throw new FormatException("invalid operation");
-        var item = await ReadAsync($"api/{(operation == "list" ? "items" : "listings")}/{reference}", cancellationToken);
-        if (item.ScannedTip == null || item.SpendCheckedTip != item.ScannedTip) throw new InvalidOperationException("indexer_syncing");
-        var market = await ReadAsync($"api/marketplaces/{options.Value.Id}?configHash={configHash}", cancellationToken);
-        if (market.ScannedTip != item.ScannedTip) throw new InvalidOperationException("indexer_changed");
-        if (market.Marketplace == null || market.Marketplace.Id != options.Value.Id || market.Marketplace.ConfigHash != configHash ||
-            (operation == "list" ? item.Item?.ItemId : item.Listing?.Id) != reference) throw new InvalidDataException("indexer_identity_mismatch");
-        return new(item.Item, item.Listing, market.Marketplace, item.ScannedTip);
+        for (var attempt = 0; attempt < 4; attempt++)
+        {
+            var item = await ReadAsync($"api/{(operation == "list" ? "items" : "listings")}/{reference}", cancellationToken);
+            var market = await ReadAsync($"api/marketplaces/{options.Value.Id}?configHash={configHash}", cancellationToken);
+            if (market.Marketplace == null || market.Marketplace.Id != options.Value.Id || market.Marketplace.ConfigHash != configHash ||
+                (operation == "list" ? item.Item?.ItemId : item.Listing?.Id) != reference) throw new InvalidDataException("indexer_identity_mismatch");
+            if (item.ScannedTip != null && item.SpendCheckedTip == item.ScannedTip && market.ScannedTip == item.ScannedTip)
+                return new(item.Item, item.Listing, market.Marketplace, item.ScannedTip);
+            await Task.Delay(500, cancellationToken);
+        }
+        throw new InvalidOperationException("indexer_syncing");
     }
 
     private async Task<Envelope> ReadAsync(string path, CancellationToken cancellationToken)

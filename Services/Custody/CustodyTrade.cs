@@ -61,11 +61,12 @@ public sealed class CustodyTrade(CustodyOpen request, CustodyContext initial, Cu
         var type = packet.GetProperty("type").GetString();
         if (type == "recover" && request.Operation != "list")
         {
-            var receipt = journal.Read(initial.Listing!.Output.KeyImage);
+            var records = journal.ReadAll(initial.Listing!.Output.KeyImage);
+            var hash = packet.TryGetProperty("signatureHash", out var hashField) ? hashField.GetString() : null;
+            if (hash != null) OwnerSignature.Hex(hash, 32);
+            var receipt = records.LastOrDefault(r => r.OwnerKey == request.OwnerKey && r.Reference == request.Reference &&
+                r.ConfigHash == request.ConfigHash && r.Operation == request.Operation && (hash == null || r.SignatureHash == hash));
             if (receipt == null) return new { type = "not-signed" };
-            if (receipt.OwnerKey != request.OwnerKey || receipt.Reference != request.Reference ||
-                receipt.ConfigHash != request.ConfigHash || receipt.Operation != request.Operation)
-                throw new InvalidOperationException("output_already_signed");
             return new { type = "signed", transaction = receipt.Transaction };
         }
         await Fresh(cancellationToken);
@@ -82,7 +83,7 @@ public sealed class CustodyTrade(CustodyOpen request, CustodyContext initial, Cu
         }
         if (request.Operation == "list") throw new InvalidOperationException("unexpected_trade_step");
         var listing = initial.Listing!;
-        if (journal.Read(listing.Output.KeyImage) != null) throw new InvalidOperationException("output_already_signed");
+        if (request.Operation != "cancel" && journal.Read(listing.Output.KeyImage) != null) throw new InvalidOperationException("output_already_signed");
         if (type == "input" && stage == "new")
         {
             recipient = Address(packet, "recipient"); change = Address(packet, "change");

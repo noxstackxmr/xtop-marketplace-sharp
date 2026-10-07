@@ -12,7 +12,7 @@ namespace MarketplaceCore.Services.Custody;
 
 public sealed class CustodySessions(CustodyKeys keys, CustodyProofs proofs, ICustodyDirectory directory,
     ICustodyNode node, ICustodySignerFactory signers, CustodyJournal journal, IOptions<MarketplaceOptions> marketplace,
-    IOptions<CustodyOptions> custody, TimeProvider clock) : BackgroundService
+    IOptions<CustodyOptions> custody, TimeProvider clock, ILogger<CustodySessions> logger) : BackgroundService
 {
     private readonly SemaphoreSlim gate = new(1);
     private readonly Dictionary<string, Session> sessions = [];
@@ -72,7 +72,11 @@ public sealed class CustodySessions(CustodyKeys keys, CustodyProofs proofs, ICus
             var recovery = packetType.GetString() == "recover";
             if (!recovery)
             {
-                if (reservations.TryGetValue(session.Reservation, out var holder) && holder != id) throw new InvalidOperationException("item_busy");
+                if (reservations.TryGetValue(session.Reservation, out var holder) && holder != id)
+                {
+                    if (session.Request.Operation != "cancel") throw new InvalidOperationException("item_busy");
+                    if (sessions.Remove(holder, out var previous)) previous.Dispose();
+                }
                 reservations[session.Reservation] = id;
             }
             object result;
@@ -84,6 +88,10 @@ public sealed class CustodySessions(CustodyKeys keys, CustodyProofs proofs, ICus
                 CryptographicException or HttpRequestException or JsonException or KeyNotFoundException or OverflowException or TaskCanceledException)
             {
                 session.Trade!.Dispose();
+                if (reservations.GetValueOrDefault(session.Reservation) == id) reservations.Remove(session.Reservation);
+                var reason = exception.Message.All(c => c is >= 'a' and <= 'z' or '_') && exception.Message.Length <= 80
+                    ? exception.Message : exception.GetType().Name;
+                logger.LogWarning("Custody {Operation} rejected: {Reason}", session.Request.Operation, reason);
                 result = new { type = "error", code = "trade_rejected" };
             }
             var response = session.Encrypt(result, envelope.Sequence);

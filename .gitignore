@@ -9,3 +9,4 @@ Native/cache/
 Tests
 SigningBackend/target/
 data/
+build.local.props

@@ -18,7 +18,7 @@ try {
         $cargo = Join-Path $env:CARGO_HOME 'bin/cargo.exe'
     }
     $command = if ($Test) { 'test' } else { 'build' }
-    & $cargo $command --locked --offline --release --manifest-path "$PSScriptRoot/Cargo.toml"
+    & $cargo $command --locked --release --manifest-path "$PSScriptRoot/Cargo.toml"
     if ($LASTEXITCODE -ne 0) { throw 'Custody signer build failed' }
 } finally {
     $env:CARGO_HOME = $previousCargo

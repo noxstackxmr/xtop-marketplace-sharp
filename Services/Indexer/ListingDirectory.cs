@@ -47,7 +47,7 @@ public sealed class ListingDirectory(HttpClient http, IOptions<MarketplaceOption
     }
 
     private sealed record Tip(long Height, string Hash);
-    private sealed class IndexerSyncException : InvalidOperationException;
+    private sealed class IndexerSyncException() : InvalidOperationException("indexer state unavailable");
     private sealed record ListingEnvelope(string Network, byte NetworkId, Tip? ScannedTip,
         Tip? SpendCheckedTip, ListingState? Listing);
 }

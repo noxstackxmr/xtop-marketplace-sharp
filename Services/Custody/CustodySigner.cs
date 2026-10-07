@@ -15,7 +15,9 @@ public sealed class CustodySignerFactory(IOptions<CustodyOptions> options, IHost
 {
     public ICustodySigner Create()
     {
-        var path = Path.GetFullPath(options.Value.SignerPath, environment.ContentRootPath);
+        var path = string.IsNullOrWhiteSpace(options.Value.SignerPath)
+            ? Path.Combine(AppContext.BaseDirectory, OperatingSystem.IsWindows() ? "xtop-custody-signer.exe" : "xtop-custody-signer")
+            : Path.GetFullPath(options.Value.SignerPath, environment.ContentRootPath);
         return new CustodySigner(path, options.Value.SignerTimeoutSeconds);
     }
 }

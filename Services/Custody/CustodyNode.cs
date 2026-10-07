@@ -1,5 +1,6 @@
 using System.Net.Http.Json;
 using System.Text.Json;
+using System.Text;
 using MarketplaceCore.Models;
 using MarketplaceCore.Options;
 using Microsoft.Extensions.Options;
@@ -37,7 +38,8 @@ public sealed class CustodyNode(HttpClient http, IOptions<MarketplaceOptions> ma
     }
     private async Task<JsonElement> Post(string path, object body, CancellationToken cancellationToken)
     {
-        using var response = await http.PostAsJsonAsync(path, body, cancellationToken);
+        using var content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
+        using var response = await http.PostAsync(path, content, cancellationToken);
         response.EnsureSuccessStatusCode();
         var data = await response.Content.ReadFromJsonAsync<JsonElement>(cancellationToken);
         if (data.TryGetProperty("error", out _) || (data.TryGetProperty("status", out var status) && status.GetString() != "OK"))

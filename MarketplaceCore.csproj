@@ -9,11 +9,29 @@
     <NativeLibraryFile Condition="'$(NativeRuntimeIdentifier)' == 'win-x64'">xtop_monero.dll</NativeLibraryFile>
     <NativeLibraryFile Condition="'$(NativeRuntimeIdentifier)' == 'linux-x64'">libxtop_monero.so</NativeLibraryFile>
   </PropertyGroup>
+  <Import Project="build.local.props" Condition="Exists('build.local.props')" />
+  <PropertyGroup>
+    <CustodySignerName Condition="'$(NativeRuntimeIdentifier)' == 'win-x64'">xtop-custody-signer.exe</CustodySignerName>
+    <CustodySignerName Condition="'$(NativeRuntimeIdentifier)' == 'linux-x64'">xtop-custody-signer</CustodySignerName>
+    <BuildCustodySigner Condition="'$(BuildCustodySigner)' == ''">true</BuildCustodySigner>
+    <CustodySignerFile Condition="'$(CustodySignerFile)' == ''">$(MSBuildProjectDirectory)/SigningBackend/target/release/$(CustodySignerName)</CustodySignerFile>
+  </PropertyGroup>
   <ItemGroup>
     <None Include="Native/build/$(NativeLibraryFile)" Link="$(NativeLibraryFile)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <None Include="Native/vendor/monero/LICENSE" Link="licenses/monero/LICENSE" CopyToOutputDirectory="PreserveNewest" />
     <None Update="LICENSE" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="$(CustodySignerFile)" Link="$(CustodySignerName)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <CustodySource Include="SigningBackend/src/**/*.rs;SigningBackend/vendor/**/*.rs;SigningBackend/vendor/**/Cargo.toml;SigningBackend/Cargo.toml;SigningBackend/Cargo.lock;SigningBackend/build.ps1;SigningBackend/build-linux.sh" />
   </ItemGroup>
+  <Target Name="BuildCustodyBackend" BeforeTargets="PrepareForBuild" Inputs="@(CustodySource)" Outputs="$(CustodySignerFile)"
+          Condition="'$(DesignTimeBuild)' != 'true' and '$(BuildCustodySigner)' == 'true'">
+    <Error Condition="'$(NativeRuntimeIdentifier)' != '$(NETCoreSdkRuntimeIdentifier)'" Text="Build the custody signer on the target platform, then set BuildCustodySigner=false and CustodySignerFile to that binary for cross-publish" />
+    <Exec Condition="$([MSBuild]::IsOSPlatform('Windows'))" Command="pwsh -NoProfile -File &quot;$(MSBuildProjectDirectory)/SigningBackend/build.ps1&quot; -Tools &quot;$(RustToolsDirectory)&quot;" />
+    <Exec Condition="$([MSBuild]::IsOSPlatform('Linux'))" Command="sh &quot;$(MSBuildProjectDirectory)/SigningBackend/build-linux.sh&quot;" />
+  </Target>
+  <Target Name="CheckCustodyBackend" BeforeTargets="PrepareForBuild" DependsOnTargets="BuildCustodyBackend" Condition="'$(DesignTimeBuild)' != 'true'">
+    <Error Condition="!Exists('$(CustodySignerFile)')" Text="Custody signer binary is missing" />
+  </Target>
   <Target Name="CheckNativeLibrary" BeforeTargets="PrepareForBuild" Condition="'$(DesignTimeBuild)' != 'true'">
     <Error Condition="'$(NativeLibraryFile)' == ''" Text="Native verification supports win-x64 and linux-x64" />
     <Error Condition="!Exists('$(MSBuildProjectDirectory)/Native/build/$(NativeLibraryFile)')" Text="Build the native library using Native/build.ps1 or Native/build-linux.sh" />
