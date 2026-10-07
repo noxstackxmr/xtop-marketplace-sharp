@@ -1,0 +1,15 @@
+[package]
+name = "xtop-custody-signer"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+monero-wallet = { path = "vendor/monero-wallet" }
+monero-simple-request-rpc = "0.1"
+curve25519-dalek = "4"
+zeroize = "1"
+rand_core = { version = "0.6", features = ["getrandom"] }
+serde_json = "1"
+hex = "0.4"
+tokio = { version = "1", features = ["rt", "macros", "io-std", "io-util"] }

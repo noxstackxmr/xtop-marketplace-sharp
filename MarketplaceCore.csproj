@@ -3,7 +3,7 @@
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <DefaultItemExcludes>$(DefaultItemExcludes);Tests/**;Native/**;Client/**</DefaultItemExcludes>
+    <DefaultItemExcludes>$(DefaultItemExcludes);Tests/**;Checks/**;Native/**;Client/**;SigningBackend/**;data/**</DefaultItemExcludes>
     <NativeRuntimeIdentifier Condition="'$(RuntimeIdentifier)' != ''">$(RuntimeIdentifier)</NativeRuntimeIdentifier>
     <NativeRuntimeIdentifier Condition="'$(NativeRuntimeIdentifier)' == ''">$(NETCoreSdkRuntimeIdentifier)</NativeRuntimeIdentifier>
     <NativeLibraryFile Condition="'$(NativeRuntimeIdentifier)' == 'win-x64'">xtop_monero.dll</NativeLibraryFile>

@@ -1,0 +1,46 @@
+[
+  {
+    "source": "IndexerCore/Monero/MoneroProofCrypto.cs",
+    "sha256": "07456999d94b115ec6cef20a1fcc58e44ef4219e11fd3165c023e6c67c8a16ed"
+  },
+  {
+    "source": "IndexerCore/Monero/MoneroProofTransaction.cs",
+    "sha256": "020418e8ccf252270055924c8cea1cfdb66ffbc7a32e4a1af2dd2e5d0f7b3532"
+  },
+  {
+    "source": "IndexerCore/Protocol/Messages/PayloadReader.cs",
+    "sha256": "5b8f2a72ce953b8f8099eb924cfc113282d16139e6090f8f5c94a5a59e0164d2"
+  },
+  {
+    "source": "IndexerCore/Protocol/Messages/XtopMessageReader.cs",
+    "sha256": "c354b1cc2e04ad48e31d7611de549233383dfb950d4f831ce8cf8ceb988f5982"
+  },
+  {
+    "source": "IndexerCore/Protocol/Sales/ListingProofs.cs",
+    "sha256": "f9d8e78a3c161af63bb33a66f048bf834f98f78f97e55da286a8fb7b3bb059a2"
+  },
+  {
+    "source": "IndexerCore/Protocol/Sales/ListingModes.cs",
+    "sha256": "03508dcd3ec6ec145b0da472b049d59dc83b93a828fc4c8ee0d4991fb3df367d"
+  },
+  {
+    "source": "IndexerCore/Protocol/Sales/SecondaryPurchaseProofs.cs",
+    "sha256": "068e8a6308dbbf0c867837c319c5c33bc785677b75648086e55a923e86750b64"
+  },
+  {
+    "source": "IndexerCore/Protocol/Sales/PrimarySaleEncoding.cs",
+    "sha256": "5f95b6cd246e4805ecde96101450d6907ef2fb2ef7d9739854ee03f8987422c8"
+  },
+  {
+    "source": "IndexerCore/Protocol/Marketplaces/MarketplacePolicy.cs",
+    "sha256": "62ad8b81e9c895ed8f48bf3e761e39745065855f4eaca12e14ff6216e7038f90"
+  },
+  {
+    "source": "IndexerCore/Protocol/Marketplaces/MarketplaceConfiguration.cs",
+    "sha256": "306fc5090d13d1d887a73330bbe8d2d79d11dd43abd84e649dc3ee719877c302"
+  },
+  {
+    "source": "IndexerCore/Protocol/Items/ItemIdentity.cs",
+    "sha256": "f7b541f15fd523bf2d80d98201ace8d1bc6c49379629d81900ecf5a482496c84"
+  }
+]

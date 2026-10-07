@@ -5,6 +5,7 @@ using MarketplaceCore.Hubs;
 using MarketplaceCore.Options;
 using MarketplaceCore.Services.Channels;
 using MarketplaceCore.Services.Indexer;
+using MarketplaceCore.Services.Custody;
 using Microsoft.AspNetCore.Http.Connections;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.RateLimiting;
@@ -29,7 +30,28 @@ public static class MarketplaceApplication
             .Validate(o => o.AllowedOrigins.All(IsOrigin), "invalid allowed origin")
             .ValidateOnStart();
         builder.Services.AddOptions<ChannelOptions>().BindConfiguration("Channels").ValidateDataAnnotations().ValidateOnStart();
+        builder.Services.AddOptions<CustodyOptions>().BindConfiguration("Custody").ValidateDataAnnotations().ValidateOnStart();
         builder.Services.AddSingleton(TimeProvider.System);
+        builder.Services.AddSingleton<CustodyKeys>();
+        builder.Services.AddSingleton<CustodyProofs>();
+        builder.Services.AddSingleton<CustodyJournal>();
+        builder.Services.AddSingleton<ICustodySignerFactory, CustodySignerFactory>();
+        builder.Services.AddSingleton<CustodySessions>();
+        builder.Services.AddHostedService(services => services.GetRequiredService<CustodySessions>());
+        builder.Services.AddHttpClient<ICustodyDirectory, CustodyDirectory>((services, http) =>
+        {
+            var options = services.GetRequiredService<IOptions<MarketplaceOptions>>().Value;
+            http.BaseAddress = new Uri(options.IndexerUrl.TrimEnd('/') + "/");
+            http.Timeout = TimeSpan.FromSeconds(options.RequestTimeoutSeconds);
+            http.MaxResponseContentBufferSize = 131072;
+        }).ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
+        builder.Services.AddHttpClient<ICustodyNode, CustodyNode>((services, http) =>
+        {
+            var options = services.GetRequiredService<IOptions<CustodyOptions>>().Value;
+            http.BaseAddress = new Uri(options.RpcUrl.TrimEnd('/') + "/");
+            http.Timeout = TimeSpan.FromSeconds(15);
+            http.MaxResponseContentBufferSize = 131072;
+        }).ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
         builder.Services.AddSingleton<RelayState>();
         builder.Services.AddHostedService<ConnectionCleanup>();
         builder.Services.AddHttpClient<IListingDirectory, ListingDirectory>((services, http) =>
@@ -64,6 +86,7 @@ public static class MarketplaceApplication
         var app = builder.Build();
         var marketplace = app.Services.GetRequiredService<IOptions<MarketplaceOptions>>().Value;
         var channels = app.Services.GetRequiredService<IOptions<ChannelOptions>>().Value;
+        _ = app.Services.GetRequiredService<CustodyKeys>();
         if (!OwnerSignature.IsOwner("5866666666666666666666666666666666666666666666666666666666666666"))
             throw new InvalidOperationException("native signature verification unavailable");
         app.UseExceptionHandler();
