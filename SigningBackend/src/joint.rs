@@ -134,6 +134,60 @@ fn verify_contribution(joint: &Joint, v: &Value) -> Result<(usize, Clsag, Compre
     Ok((index, clsag, pseudo))
 }
 
+fn chain_outputs(joint: &Joint) -> Result<Vec<Value>, Error> {
+    let mut outputs = Vec::new();
+    for (native, supplied) in joint.body.prefix().inputs.iter().zip(&joint.inputs) {
+        let Input::ToKey { amount: None, key_offsets, .. } = native else { return Err("Expected RingCT input".into()) };
+        if key_offsets.len() != 16 || key_offsets.as_slice() != supplied.decoys().offsets() {
+            return Err("Ring offsets differ from transaction".into());
+        }
+        let mut absolute = 0u64;
+        for (i, offset) in key_offsets.iter().enumerate() {
+            if i > 0 && *offset == 0 { return Err("Duplicate ring index".into()); }
+            absolute = absolute.checked_add(*offset).ok_or("Ring index overflow")?;
+            outputs.push(json!({"amount":0,"index":absolute}));
+        }
+    }
+    Ok(outputs)
+}
+
+fn match_chain_outputs(joint: &Joint, response: &Value) -> Result<(), Error> {
+    if response["status"] != "OK" || response["untrusted"] == true { return Err("Untrusted ring lookup".into()); }
+    let outputs = response["outs"].as_array().ok_or("Missing chain outputs")?;
+    if outputs.len() != joint.inputs.len() * 16 { return Err("Incomplete ring lookup".into()); }
+    for (actual, expected) in outputs.iter().zip(joint.inputs.iter().flat_map(|i| i.decoys().ring())) {
+        if actual["unlocked"] != true || actual["key"] != hex::encode(expected[0].compress().to_bytes()) ||
+            actual["mask"] != hex::encode(expected[1].compress().to_bytes()) {
+            return Err("Ring member differs from unlocked blockchain output".into());
+        }
+    }
+    Ok(())
+}
+
+async fn check_chain_inputs(joint: &Joint, rpc: &Rpc) -> Result<(), Error> {
+    let rate = rpc.fee_rate(FeePriority::Unimportant, u64::MAX).await?;
+    let mut complete = joint.body.clone();
+    let Transaction::V2 { proofs: Some(RctProofs { base, prunable: RctPrunable::Clsag { clsags, pseudo_outs, .. } }), .. } = &mut complete
+        else { return Err("Expected CLSAG transaction".into()) };
+    let fee = base.fee;
+    *clsags = (0..joint.inputs.len()).map(|_| Clsag { D: CompressedPoint::G, s: vec![Scalar::ZERO;16], c1: Scalar::ZERO }).collect();
+    *pseudo_outs = vec![CompressedPoint::G;joint.inputs.len()];
+    if u128::from(fee) < rate.calculate_fee_from_weight(u64::try_from(complete.weight())?) {
+        return Err("Fee quote is below the current node estimate".into());
+    }
+    let outputs = chain_outputs(joint)?;
+    let response: Value = serde_json::from_str(&rpc.rpc_call("get_outs",
+        Some(json!({"outputs":outputs,"get_txid":false}).to_string()), 131072).await?)?;
+    match_chain_outputs(joint, &response)?;
+    let spent: Value = serde_json::from_str(&rpc.rpc_call("is_key_image_spent",
+        Some(json!({"key_images":images(&joint.body)?.iter().map(|i|hex::encode(i.to_bytes())).collect::<Vec<_>>()} ).to_string()), 16384).await?)?;
+    let statuses = spent["spent_status"].as_array().ok_or("Missing spent status")?;
+    if spent["status"] != "OK" || spent["untrusted"] == true || statuses.len() != joint.inputs.len() || statuses.iter().any(|s| s.as_u64() != Some(0)) {
+        return Err("Input is spent or pending".into());
+    }
+    Ok(())
+}
+
 fn sign(own: &OwnInput, joint: &mut Joint, v: &Value) -> Result<Value, Error> {
     if joint.signed.is_some() { return Err("This process already signed its immutable joint body".into()); }
     if !joint.bound { return Err("Bind the final carrier before signing".into()); }
@@ -287,6 +341,8 @@ pub(super) async fn handle(v: &Value, state: &mut State, rpc_cache: &mut Option<
             if state.joint.is_some() || state.public.is_some() { return Err("Joint intent is already pinned".into()); }
             let own = state.own.as_ref().ok_or("Prepare an owned input first")?;
             let joint = accept(own,&v["package"],field(v,"unsigned_blob")?,v)?;
+            let rpc = checked_rpc(v, rpc_cache).await?;
+            check_chain_inputs(&joint, &rpc).await?;
             let result = json!({"accepted":true,"unsigned_blob":hex::encode(joint.body.serialize()),"fee":joint.intent.necessary_fee()});
             state.joint = Some(joint); Ok(result)
         }
@@ -303,6 +359,11 @@ pub(super) async fn handle(v: &Value, state: &mut State, rpc_cache: &mut Option<
             joint.intent = intent; joint.body = body; joint.bound = true; Ok(result)
         }
         "joint_sign" => sign(state.own.as_ref().ok_or("No owned input")?,state.joint.as_mut().ok_or("No joint intent")?,v),
+        "joint_check_inputs" => {
+            let rpc = checked_rpc(v, rpc_cache).await?;
+            check_chain_inputs(state.joint.as_ref().ok_or("No joint intent")?, &rpc).await?;
+            Ok(json!({"valid":true}))
+        }
         "joint_assemble" => assemble(state.joint.as_ref().ok_or("No joint intent")?,v["contributions"].as_array().ok_or("Missing contributions")?),
         "joint_submit" => {
             let own = state.own.as_ref().ok_or("No owned input")?;

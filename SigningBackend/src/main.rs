@@ -54,7 +54,7 @@ async fn command_loop() {
         let result = async {
             let v: Value = serde_json::from_str(&line)?;
             match field(&v, "command")? {
-                "joint_input" | "joint_accept" | "joint_bind" | "joint_sign" | "joint_assemble" | "joint_verify" =>
+                "joint_input" | "joint_accept" | "joint_bind" | "joint_sign" | "joint_assemble" | "joint_verify" | "joint_check_inputs" =>
                     joint::handle(&v, &mut state, &mut rpc).await,
                 _ => Err("Unsupported custody command".into())
             }

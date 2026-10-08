@@ -73,6 +73,20 @@ async fn five_nfts_one_buyer_input_native_batch() {
     assert_eq!(assembled["verified_balance"],true);
     assert_eq!(assembled["verified_bulletproof_plus"],true);
     assert_eq!(verify_native(joint,assembled["blob"].as_str().unwrap()).unwrap()["valid"],true);
+    assert_eq!(chain_outputs(joint).unwrap().len(),96);
+    let response = json!({"status":"OK", "outs":joint.inputs.iter().flat_map(|i|i.decoys().ring()).map(|r|
+        json!({"key":hex::encode(r[0].compress().to_bytes()),"mask":hex::encode(r[1].compress().to_bytes()),"unlocked":true})).collect::<Vec<_>>()});
+    assert!(match_chain_outputs(joint,&response).is_ok());
+    let mut changed = response.clone(); changed["outs"][0]["key"] = json!(hex::encode(pubkey(Scalar::random(&mut OsRng)).compress().to_bytes()));
+    assert!(match_chain_outputs(joint,&changed).is_err());
+    changed = response.clone(); changed["outs"][0]["mask"] = json!(hex::encode(pubkey(Scalar::random(&mut OsRng)).compress().to_bytes()));
+    assert!(match_chain_outputs(joint,&changed).is_err());
+    changed = response.clone(); changed["outs"][0]["unlocked"] = json!(false);
+    assert!(match_chain_outputs(joint,&changed).is_err());
+    changed = response.clone(); changed["outs"].as_array_mut().unwrap().pop();
+    assert!(match_chain_outputs(joint,&changed).is_err());
+    changed = response.clone(); changed["untrusted"] = json!(true);
+    assert!(match_chain_outputs(joint,&changed).is_err());
     let mut missing = package.clone(); missing["buyer_image"] = Value::Null;
     assert!(accept(states[1].own.as_ref().unwrap(),&missing,&unsigned,&policy).is_err());
     let mut wrong_buyer = package.clone(); wrong_buyer["buyer_image"] = json!(hex::encode(states[1].own.as_ref().unwrap().image.to_bytes()));

@@ -110,6 +110,7 @@ public sealed class CustodyTrade(CustodyOpen request, CustodyContext initial, Cu
             if (tx.Message.Length != proposed.Length) throw new FormatException("carrier_length_mismatch");
             var message = proofs.Authorize(tx, proposed, collectionPolicy, listing.ProofListing(), listing.Fees(), request.Operation, request.OwnerKey);
             await signer!.CallAsync(new { command = "joint_accept", package = packet.GetProperty("package"),
+                rpc = options.RpcUrl, network = market.Network,
                 unsigned_blob = Convert.ToHexStringLower(blob), payments, change = change!.Native() }, cancellationToken);
             var bound = await signer.CallAsync(new { command = "joint_bind", message = Convert.ToHexStringLower(message) }, cancellationToken);
             signatureHash = bound.GetProperty("signature_hash").GetString()!;
@@ -118,6 +119,7 @@ public sealed class CustodyTrade(CustodyOpen request, CustodyContext initial, Cu
         }
         if (type == "sign" && stage == "bound")
         {
+            await signer!.CallAsync(new { command = "joint_check_inputs", rpc = options.RpcUrl, network = market.Network }, cancellationToken);
             var prior = packet.GetProperty("contribution");
             var contribution = await signer!.CallAsync(new { command = "joint_sign", prior_contribution = prior }, cancellationToken);
             var final = await signer.CallAsync(new { command = "joint_assemble", contributions = new[] { prior, contribution } }, cancellationToken);
