@@ -50,8 +50,9 @@ public sealed class CommunicationController(IListingDirectory listings, RelaySta
                 reason == null && online, reason ?? (online ? null : "seller_offline")));
         }
         catch (Exception exception) when (exception is HttpRequestException or InvalidDataException or JsonException or
-            FormatException or TaskCanceledException)
+            FormatException or TaskCanceledException || exception is InvalidOperationException { Message: "indexer state unavailable" })
         {
+            Response.Headers.RetryAfter = "2";
             return StatusCode(503, new { error = "indexer_unavailable" });
         }
     }

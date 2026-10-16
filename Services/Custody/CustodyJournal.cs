@@ -3,17 +3,25 @@ using System.Text.Json;
 using MarketplaceCore.Crypto;
 using MarketplaceCore.Options;
 using Microsoft.Extensions.Options;
+using MarketplaceCore.Models;
 
 namespace MarketplaceCore.Services.Custody;
 
 public sealed record CustodyReceipt(string Reference, string ConfigHash, string Operation, string OwnerKey,
-    string KeyImage, string SignatureHash, JsonElement Transaction, long Sequence = 0);
+    string KeyImage, string SignatureHash, JsonElement Transaction, long Sequence = 0)
+{
+    public CustodyContext? Context { get; init; }
+}
 
 public sealed class CustodyJournal : IDisposable
 {
     private readonly string directory;
     private readonly byte[] key;
     private readonly FileStream? instanceLock;
+    private readonly object gate = new();
+    private sealed record Entry(string Path, string Reference, string ConfigHash, string Operation, string OwnerKey, string SignatureHash, long Sequence);
+    private readonly Dictionary<string, List<Entry>> index = [];
+    private readonly Dictionary<(string Reference, string Config, string Operation, string Owner), List<(string Image, Entry Entry)>> recovery = [];
     public CustodyJournal(CustodyKeys keys, IOptions<CustodyOptions> options, IHostEnvironment environment)
     {
         directory = Path.GetFullPath(options.Value.JournalDirectory, environment.ContentRootPath);
@@ -21,16 +29,44 @@ public sealed class CustodyJournal : IDisposable
         if (!keys.Enabled) return;
         Directory.CreateDirectory(directory);
         instanceLock = new FileStream(Path.Combine(directory, "instance.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        try
+        {
+            foreach (var path in Directory.EnumerateFiles(directory, "*.bin"))
+            {
+                var image = Path.GetFileName(path).Split('.')[0]; OwnerSignature.Hex(image, 32);
+                Add(path, ReadFile(image, path));
+            }
+        }
+        catch { instanceLock.Dispose(); throw; }
+    }
+    private void Add(string path, CustodyReceipt receipt)
+    {
+        if (!index.TryGetValue(receipt.KeyImage, out var entries)) index[receipt.KeyImage] = entries = [];
+        var entry = new Entry(path, receipt.Reference, receipt.ConfigHash, receipt.Operation, receipt.OwnerKey, receipt.SignatureHash, receipt.Sequence);
+        entries.Add(entry);
+        var identity = (receipt.Reference, receipt.ConfigHash, receipt.Operation, receipt.OwnerKey);
+        if (!recovery.TryGetValue(identity, out var matches)) recovery[identity] = matches = [];
+        matches.Add((receipt.KeyImage, entry));
+    }
+    public string[] LatestImages() { lock (gate) return index.Keys.ToArray(); }
+    public CustodyReceipt? Find(CustodyOpen request)
+    {
+        lock (gate)
+        {
+            if (!recovery.TryGetValue((request.Reference, request.ConfigHash, request.Operation, request.OwnerKey), out var matches)) return null;
+            var match = matches.MaxBy(m => m.Entry.Sequence);
+            return ReadFile(match.Image, match.Entry.Path);
+        }
     }
     public CustodyReceipt? Read(string image)
         => ReadAll(image).LastOrDefault();
 
     public IReadOnlyList<CustodyReceipt> ReadAll(string image)
     {
-        var path = FileName(image);
-        var paths = Directory.GetFiles(directory, image + ".*.bin").AsEnumerable();
-        if (File.Exists(path)) paths = paths.Prepend(path);
-        return paths.Select(p => ReadFile(image, p)).OrderBy(r => r.Sequence).ToArray();
+        OwnerSignature.Hex(image, 32);
+        lock (gate)
+            return index.TryGetValue(image, out var entries)
+                ? entries.OrderBy(e => e.Sequence).Select(e => ReadFile(image, e.Path)).ToArray() : [];
     }
     private CustodyReceipt ReadFile(string image, string path)
     {
@@ -48,6 +84,10 @@ public sealed class CustodyJournal : IDisposable
         finally { CryptographicOperations.ZeroMemory(plain); }
     }
     public void Save(CustodyReceipt receipt)
+    {
+        lock (gate) SaveLocked(receipt);
+    }
+    private void SaveLocked(CustodyReceipt receipt)
     {
         var existing = ReadAll(receipt.KeyImage);
         if (existing.Count != 0 && receipt.Operation != "cancel") throw new InvalidOperationException("output_already_signed");
@@ -68,6 +108,7 @@ public sealed class CustodyJournal : IDisposable
             using (var file = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough))
             { file.Write(bytes); file.Flush(true); }
             File.Move(temporary, destination, false);
+            Add(destination, receipt);
         }
         finally { CryptographicOperations.ZeroMemory(plain); if (File.Exists(temporary)) File.Delete(temporary); }
     }

@@ -20,7 +20,8 @@ public sealed class RelayFilter(RelayState state) : IHubFilter
             throw new HubException(exception.Message);
         }
         catch (FormatException) { throw new HubException("invalid_input"); }
-        catch (Exception exception) when (exception is HttpRequestException or JsonException or InvalidDataException)
+        catch (Exception exception) when (exception is HttpRequestException or JsonException or InvalidDataException ||
+            exception is InvalidOperationException { Message: "indexer state unavailable" })
         {
             throw new HubException("indexer_unavailable");
         }

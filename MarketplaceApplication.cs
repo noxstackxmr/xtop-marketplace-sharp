@@ -30,11 +30,18 @@ public static class MarketplaceApplication
             .Validate(o => o.AllowedOrigins.All(IsOrigin), "invalid allowed origin")
             .ValidateOnStart();
         builder.Services.AddOptions<ChannelOptions>().BindConfiguration("Channels").ValidateDataAnnotations().ValidateOnStart();
-        builder.Services.AddOptions<CustodyOptions>().BindConfiguration("Custody").ValidateDataAnnotations().ValidateOnStart();
+        builder.Services.AddOptions<CustodyOptions>().BindConfiguration("Custody").ValidateDataAnnotations()
+            .Validate(o => o.MaximumRetainedSessions > o.MaximumSessions + o.ParallelTrades, "retain extra capacity for cancellation and receipt recovery")
+            .Validate(o => o.SignerMemorySoftLimitBytes == 0 || !string.IsNullOrWhiteSpace(o.MemoryUsageFile), "memory limit requires service memory usage file")
+            .Validate(o => !o.Enabled || o.SignerMemorySoftLimitBytes == 0 || ReadableMemoryUsage(o.MemoryUsageFile), "memory usage file must be readable and contain a non-negative byte count")
+            .ValidateOnStart();
         builder.Services.AddSingleton(TimeProvider.System);
         builder.Services.AddSingleton<CustodyKeys>();
         builder.Services.AddSingleton<CustodyProofs>();
         builder.Services.AddSingleton<CustodyJournal>();
+        builder.Services.AddSingleton<CustodyResources>();
+        builder.Services.AddSingleton<CustodySettlement>();
+        builder.Services.AddHostedService(s => s.GetRequiredService<CustodySettlement>());
         builder.Services.AddSingleton<ICustodySignerFactory, CustodySignerFactory>();
         builder.Services.AddSingleton<CustodySessions>();
         builder.Services.AddHostedService(services => services.GetRequiredService<CustodySessions>());
@@ -44,6 +51,13 @@ public static class MarketplaceApplication
             http.BaseAddress = new Uri(options.IndexerUrl.TrimEnd('/') + "/");
             http.Timeout = TimeSpan.FromSeconds(options.RequestTimeoutSeconds);
             http.MaxResponseContentBufferSize = 131072;
+        }).ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
+        builder.Services.AddHttpClient<ICustodySubmissionNode, CustodySubmissionNode>((services, http) =>
+        {
+            var options = services.GetRequiredService<IOptions<CustodyOptions>>().Value;
+            http.BaseAddress = new Uri(options.RpcUrl.TrimEnd('/') + "/");
+            http.Timeout = TimeSpan.FromSeconds(options.SubmissionTimeoutSeconds);
+            http.MaxResponseContentBufferSize = 262144;
         }).ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
         builder.Services.AddHttpClient<ICustodyNode, CustodyNode>((services, http) =>
         {
@@ -75,12 +89,28 @@ public static class MarketplaceApplication
         builder.Services.AddRateLimiter(options =>
         {
             options.RejectionStatusCode = 429;
+            options.OnRejected = async (context, token) =>
+            {
+                context.HttpContext.Response.Headers.RetryAfter = "2";
+                await context.HttpContext.Response.WriteAsJsonAsync(new { error = "service_busy" }, token);
+            };
             options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(context =>
-                RateLimitPartition.GetConcurrencyLimiter("requests", _ => new ConcurrencyLimiterOptions
-                { PermitLimit = 1024, QueueLimit = 0 }));
+            {
+                var custody = context.RequestServices.GetRequiredService<IOptions<CustodyOptions>>().Value;
+                var channels = context.RequestServices.GetRequiredService<IOptions<ChannelOptions>>().Value;
+                var path = context.Request.Path;
+                var bucket = path.StartsWithSegments("/hubs") ? "relay" : path.Value?.EndsWith("/messages", StringComparison.Ordinal) == true
+                    ? "transactions" : path.StartsWithSegments("/api/custody/sessions") ? "opening" : "reads";
+                return RateLimitPartition.GetConcurrencyLimiter(bucket, _ => new ConcurrencyLimiterOptions
+                {
+                    PermitLimit = bucket == "relay" ? channels.MaximumConnections : custody.MaximumHttpRequests,
+                    QueueLimit = bucket == "relay" ? 0 : custody.MaximumQueuedRequests, QueueProcessingOrder = QueueProcessingOrder.OldestFirst
+                });
+            });
             options.AddPolicy("http", context => RateLimitPartition.GetFixedWindowLimiter(
-                context.Connection.RemoteIpAddress?.ToString() ?? "unknown", _ => new FixedWindowRateLimiterOptions
-                { PermitLimit = 120, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
+                (context.Connection.RemoteIpAddress?.ToString() ?? "unknown") + (context.Request.Path.StartsWithSegments("/api/custody/sessions") ? ":trade" : ":read"),
+                _ => new FixedWindowRateLimiterOptions
+                { PermitLimit = context.RequestServices.GetRequiredService<IOptions<CustodyOptions>>().Value.HttpRequestsPerMinutePerIp, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
         });
         configure?.Invoke(builder);
         var app = builder.Build();
@@ -133,6 +163,12 @@ public static class MarketplaceApplication
             options.TransportMaxBufferSize = channels.MaximumMessageBytes * 2 + 4096;
         }).RequireRateLimiting("http");
         return app;
+    }
+
+    private static bool ReadableMemoryUsage(string path)
+    {
+        try { return Path.IsPathFullyQualified(path) && long.TryParse(File.ReadAllText(path).Trim(), out var bytes) && bytes >= 0; }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException) { return false; }
     }
 
     private static bool IsOrigin(string value)

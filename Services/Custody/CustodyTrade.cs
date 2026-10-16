@@ -12,9 +12,16 @@ namespace MarketplaceCore.Services.Custody;
 
 public sealed class CustodyTrade(CustodyOpen request, CustodyContext initial, CustodyKeys keys, CustodyProofs proofs,
     ICustodyDirectory directory, ICustodyNode node, ICustodySignerFactory signers, CustodyJournal journal,
-    MarketplaceOptions market, CustodyOptions options) : IDisposable
+    MarketplaceOptions market, CustodyOptions options, CustodyResources resources) : IDisposable
 {
     private ICustodySigner? signer;
+    private IDisposable? signerSlot;
+    public bool Completed => Volatile.Read(ref stage) is "signed" or "listed" or "failed" or "recovered";
+    public async Task ReserveSignerAsync(string? type, CancellationToken token)
+    {
+        if (type == "input" && stage == "new" && request.Operation != "list" && signerSlot == null)
+            signerSlot = await resources.Signers.EnterAsync(token);
+    }
     private CustodyAddress? recipient;
     private CustodyAddress? change;
     private object[]? payments;
@@ -66,6 +73,7 @@ public sealed class CustodyTrade(CustodyOpen request, CustodyContext initial, Cu
             if (hash != null) OwnerSignature.Hex(hash, 32);
             var receipt = records.LastOrDefault(r => r.OwnerKey == request.OwnerKey && r.Reference == request.Reference &&
                 r.ConfigHash == request.ConfigHash && r.Operation == request.Operation && (hash == null || r.SignatureHash == hash));
+            stage = "recovered";
             if (receipt == null) return new { type = "not-signed" };
             return new { type = "signed", transaction = receipt.Transaction };
         }
@@ -86,6 +94,7 @@ public sealed class CustodyTrade(CustodyOpen request, CustodyContext initial, Cu
         if (request.Operation != "cancel" && journal.Read(listing.Output.KeyImage) != null) throw new InvalidOperationException("output_already_signed");
         if (type == "input" && stage == "new")
         {
+            if (signerSlot == null) throw new InvalidOperationException("signer_capacity_required");
             recipient = Address(packet, "recipient"); change = Address(packet, "change");
             if (request.Operation == "cancel" && recipient != listing.ReturnAddress) throw new InvalidOperationException("wrong_return_address");
             if (recipient.Bytes().SequenceEqual(keys.Address) || change.Bytes().SequenceEqual(keys.Address))
@@ -130,8 +139,9 @@ public sealed class CustodyTrade(CustodyOpen request, CustodyContext initial, Cu
             var tx = MoneroProofTransaction.Parse(Hex(final, "blob", 100000));
             if (request.Operation == "cancel") ListingProofs.VerifyCancel(tx, collectionPolicy, listing.ProofListing());
             else SecondaryPurchaseProofs.Verify(tx, collectionPolicy, listing.ProofListing(), listing.Fees());
-            journal.Save(new(request.Reference, request.ConfigHash, request.Operation, request.OwnerKey, listing.Output.KeyImage, signatureHash!, final));
+            journal.Save(new(request.Reference, request.ConfigHash, request.Operation, request.OwnerKey, listing.Output.KeyImage, signatureHash!, final) { Context = initial });
             stage = "signed"; signer.Dispose(); signer = null;
+            signerSlot?.Dispose(); signerSlot = null;
             return new { type = "signed", transaction = final };
         }
         throw new InvalidOperationException("unexpected_trade_step");
@@ -147,5 +157,5 @@ public sealed class CustodyTrade(CustodyOpen request, CustodyContext initial, Cu
         if (value.Length == 0 || value.Length > maximum * 2 || value.Length % 2 != 0) throw new FormatException("invalid_blob_length");
         return OwnerSignature.Hex(value, value.Length / 2);
     }
-    public void Dispose() { signer?.Dispose(); signer = null; stage = "failed"; }
+    public void Dispose() { signer?.Dispose(); signer = null; signerSlot?.Dispose(); signerSlot = null; stage = "failed"; }
 }

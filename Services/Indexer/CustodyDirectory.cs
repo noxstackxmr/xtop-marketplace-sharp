@@ -22,8 +22,11 @@ public sealed class CustodyDirectory(HttpClient http, IOptions<MarketplaceOption
         if (operation is not ("list" or "cancel" or "purchase")) throw new FormatException("invalid operation");
         for (var attempt = 0; attempt < 4; attempt++)
         {
-            var item = await ReadAsync($"api/{(operation == "list" ? "items" : "listings")}/{reference}", cancellationToken);
-            var market = await ReadAsync($"api/marketplaces/{options.Value.Id}?configHash={configHash}", cancellationToken);
+            var itemRead = ReadAsync($"api/{(operation == "list" ? "items" : "listings")}/{reference}", cancellationToken);
+            var marketRead = ReadAsync($"api/marketplaces/{options.Value.Id}?configHash={configHash}", cancellationToken);
+            await Task.WhenAll(itemRead, marketRead);
+            var item = await itemRead;
+            var market = await marketRead;
             if (market.Marketplace == null || market.Marketplace.Id != options.Value.Id || market.Marketplace.ConfigHash != configHash ||
                 (operation == "list" ? item.Item?.ItemId : item.Listing?.Id) != reference) throw new InvalidDataException("indexer_identity_mismatch");
             if (item.ScannedTip != null && item.SpendCheckedTip == item.ScannedTip && market.ScannedTip == item.ScannedTip)

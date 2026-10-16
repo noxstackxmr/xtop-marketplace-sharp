@@ -30,6 +30,31 @@ public sealed class CustodyNode(HttpClient http, IOptions<MarketplaceOptions> ma
         if (spent.GetProperty("spent_status").GetArrayLength() != 1 || spent.GetProperty("spent_status")[0].GetInt32() != 0)
             throw new InvalidOperationException("output_spent_or_pending");
     }
+    
+    public async Task CheckBatchAsync(CustodyTip tip, CustodyOutput[] outputs, bool unlocked, CancellationToken cancellationToken)
+    {
+        if (outputs.Length is < 1 or > 5 || outputs.Select(o => o.KeyImage).Distinct().Count() != outputs.Length)
+            throw new InvalidDataException("invalid_output_batch");
+        var info = await Post("get_info", new { }, cancellationToken);
+        if (info.GetProperty("nettype").GetString() != market.Value.Network || info.GetProperty("height").GetInt64() - 1 - tip.Height is < 0 or > 2)
+            throw new InvalidOperationException("node_or_indexer_not_ready");
+        var genesis = await Header(0, cancellationToken);
+        if (genesis.GetProperty("hash").GetString() != custody.Value.GenesisHash) throw new InvalidOperationException("wrong_genesis");
+        var head = await Header(tip.Height, cancellationToken);
+        if (head.GetProperty("hash").GetString() != tip.Hash) throw new InvalidOperationException("chain_changed");
+        foreach (var group in outputs.GroupBy(o => o.BlockHeight))
+        {
+            var source = await Header(group.Key, cancellationToken);
+            if (group.Any(o => source.GetProperty("hash").GetString() != o.BlockHash)) throw new InvalidOperationException("chain_changed");
+        }
+        if (unlocked && outputs.Any(o => tip.Height < checked(o.BlockHeight + 10))) throw new InvalidOperationException("output_locked");
+        var spent = await Post("is_key_image_spent", new { key_images = outputs.Select(o => o.KeyImage).ToArray() }, cancellationToken);
+        var states = spent.GetProperty("spent_status");
+        if (states.GetArrayLength() != outputs.Length || states.EnumerateArray().Any(s => s.GetInt32() != 0))
+            throw new InvalidOperationException("output_spent_or_pending");
+        if ((await Header(tip.Height, cancellationToken)).GetProperty("hash").GetString() != tip.Hash)
+            throw new InvalidOperationException("chain_changed");
+    }
 
     private async Task<JsonElement> Header(long height, CancellationToken cancellationToken)
     {

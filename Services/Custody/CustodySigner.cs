@@ -61,7 +61,11 @@ internal sealed class CustodySigner : ICustodySigner
     {
         if (disposed) return;
         disposed = true;
-        try { if (!process.HasExited) process.Kill(true); }
+        try
+        {
+            if (!process.HasExited) process.Kill(true);
+            process.WaitForExit();
+        }
         finally { process.Dispose(); }
     }
 }

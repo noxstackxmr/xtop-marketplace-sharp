@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text.Json;
 using MarketplaceCore.Crypto;
@@ -12,12 +13,16 @@ namespace MarketplaceCore.Services.Custody;
 
 public sealed class CustodySessions(CustodyKeys keys, CustodyProofs proofs, ICustodyDirectory directory,
     ICustodyNode node, ICustodySignerFactory signers, CustodyJournal journal, IOptions<MarketplaceOptions> marketplace,
-    IOptions<CustodyOptions> custody, TimeProvider clock, ILogger<CustodySessions> logger) : BackgroundService
+    IOptions<CustodyOptions> custody, TimeProvider clock, ILogger<CustodySessions> logger,
+    CustodyResources resources, CustodySettlement settlement) : BackgroundService
 {
-    private readonly SemaphoreSlim gate = new(1);
+    private readonly object gate = new();
     private readonly Dictionary<string, Session> sessions = [];
     private readonly Dictionary<string, string> reservations = [];
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
+    private bool stopping;
+    private readonly CancellationTokenSource shutdown = new();
+    private long Now => clock.GetUtcNow().ToUnixTimeSeconds();
 
     public static byte[] RequestHash(CustodyOpen request, MarketplaceOptions market) => MoneroProofCrypto.Hash(
         JsonSerializer.SerializeToUtf8Bytes(new { domain = "XTOP:CUSTODY:OPEN:V1", network = market.NetworkId, marketplace = market.Id,
@@ -27,112 +32,205 @@ public sealed class CustodySessions(CustodyKeys keys, CustodyProofs proofs, ICus
     public async Task<CustodyHandshake> OpenAsync(CustodyOpen request, CancellationToken cancellationToken)
     {
         if (!keys.Enabled) throw new InvalidOperationException("custody_disabled");
-        var now = clock.GetUtcNow().ToUnixTimeSeconds();
-        if (request.ExpiresAt <= now || request.ExpiresAt > now + 120 || request.Operation is not ("list" or "cancel" or "purchase"))
+        if (request.ExpiresAt <= Now || request.ExpiresAt > Now + 120 || request.Operation is not ("list" or "cancel" or "purchase"))
             throw new FormatException("invalid_custody_request");
         OwnerSignature.Hex(request.Reference, 32); OwnerSignature.Hex(request.ConfigHash, 32); OwnerSignature.Hex(request.Nonce, 32);
         OwnerSignature.RequireEncryptionKey(request.EncryptionKey);
         if (!OwnerSignature.IsOwner(request.OwnerKey) || !OwnerSignature.Verify(Convert.ToHexStringLower(RequestHash(request, marketplace.Value)), request.OwnerKey, request.Signature))
             throw new InvalidOperationException("owner_authentication_failed");
-        await gate.WaitAsync(cancellationToken);
-        try
+        lock (gate)
         {
+            if (stopping) throw new InvalidOperationException("custody_busy");
             Sweep();
-            var duplicate = sessions.Values.FirstOrDefault(s => s.Request.OwnerKey == request.OwnerKey && s.Request.Nonce == request.Nonce);
-            if (duplicate != null)
+            if (Duplicate(request) is { } duplicate) return duplicate.Handshake;
+        }
+        var receipt = journal.Find(request);
+        using var work = await resources.Work.EnterAsync(receipt != null || request.Operation == "cancel", cancellationToken);
+        var context = receipt?.Context ?? await directory.GetAsync(request.Operation, request.Reference, request.ConfigHash, cancellationToken);
+        CustodyTrade.ReadPolicy(context, request, keys, marketplace.Value);
+        lock (gate)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (stopping) throw new InvalidOperationException("custody_busy");
+            if (request.ExpiresAt <= Now) throw new InvalidOperationException("custody_request_expired");
+            Sweep();
+            if (Duplicate(request) is { } duplicate) return duplicate.Handshake;
+            receipt = journal.Find(request);
+            if (receipt == null)
             {
-                if (duplicate.Request != request) throw new InvalidOperationException("nonce_reused");
-                return duplicate.Handshake;
+                var active = sessions.Values.Where(s => !s.Completed).ToArray();
+                var cancel = request.Operation == "cancel";
+                if (active.Length >= custody.Value.MaximumSessions + (cancel ? custody.Value.ParallelTrades : 0) ||
+                    (cancel ? active.Count(s => s.Request.Operation == "cancel") >= custody.Value.ParallelTrades ||
+                        active.Any(s => s.Request.Operation == "cancel" && s.Request.OwnerKey == request.OwnerKey)
+                    : active.Count(s => s.Request.OwnerKey == request.OwnerKey) >= custody.Value.MaximumSessionsPerOwner))
+                    throw new InvalidOperationException("custody_busy");
             }
-            if (sessions.Count >= custody.Value.MaximumSessions) throw new InvalidOperationException("custody_busy");
-            var context = await directory.GetAsync(request.Operation, request.Reference, request.ConfigHash, cancellationToken);
-            CustodyTrade.ReadPolicy(context, request, keys, marketplace.Value);
-            var session = new Session(request, context, keys, marketplace.Value, custody.Value, now);
-            session.Trade = new(request, context, keys, proofs, directory, node, signers, journal, marketplace.Value, custody.Value);
+            if (sessions.Count >= custody.Value.MaximumRetainedSessions)
+                foreach (var old in sessions.Values.Where(s => s.Completed).OrderBy(s => s.Handshake.ExpiresAt).ToArray())
+                { Retire(old); if (sessions.Count < custody.Value.MaximumRetainedSessions) break; }
+            if (sessions.Count >= custody.Value.MaximumRetainedSessions) throw new InvalidOperationException("custody_busy");
+            var session = new Session(request, context, keys, marketplace.Value, custody.Value, Now) { RecoveryOnly = receipt != null };
+            session.Trade = new(request, context, keys, proofs, directory, node, signers, journal, marketplace.Value, custody.Value, resources);
             sessions.Add(session.Handshake.SessionId, session);
             return session.Handshake;
         }
-        finally { gate.Release(); }
     }
-
+    private Session? Duplicate(CustodyOpen request)
+    {
+        var duplicate = sessions.Values.FirstOrDefault(s => s.Request.OwnerKey == request.OwnerKey && s.Request.Nonce == request.Nonce);
+        if (duplicate != null && duplicate.Request != request) throw new InvalidOperationException("nonce_reused");
+        return duplicate;
+    }
+    private void RequireLive(Session session)
+    {
+        if (stopping || session.Revoked || session.Handshake.ExpiresAt <= Now ||
+            !sessions.TryGetValue(session.Handshake.SessionId, out var actual) || !ReferenceEquals(actual, session))
+            throw new InvalidOperationException("custody_session_expired");
+    }
     public async Task<CustodyEnvelope> ExchangeAsync(string id, CustodyEnvelope envelope, CancellationToken cancellationToken)
     {
         OwnerSignature.Hex(id, 32);
-        await gate.WaitAsync(cancellationToken);
+        Session session;
+        lock (gate) if (!sessions.TryGetValue(id, out session!)) throw new InvalidOperationException("custody_session_expired");
+        if (!await session.Processing.WaitAsync(0, cancellationToken)) throw new CustodyCapacityException();
         try
         {
-            Sweep();
-            if (!sessions.TryGetValue(id, out var session)) throw new InvalidOperationException("custody_session_expired");
+            lock (gate) RequireLive(session);
             if (envelope.Sequence == session.Sequence - 1 && session.LastRequest == envelope.Ciphertext && session.LastResponse != null)
                 return session.LastResponse;
             if (envelope.Sequence != session.Sequence || envelope.Sequence is < 0 or > 15) throw new InvalidOperationException("invalid_sequence");
             var packet = session.Decrypt(envelope);
             if (packet.ValueKind != JsonValueKind.Object || !packet.TryGetProperty("type", out var packetType) || packetType.ValueKind != JsonValueKind.String)
                 throw new FormatException("invalid_trade_packet");
-            var recovery = packetType.GetString() == "recover";
-            if (!recovery)
-            {
-                if (reservations.TryGetValue(session.Reservation, out var holder) && holder != id)
-                {
-                    if (session.Request.Operation != "cancel") throw new InvalidOperationException("item_busy");
-                    if (sessions.Remove(holder, out var previous)) previous.Dispose();
-                }
-                reservations[session.Reservation] = id;
-            }
+            var type = packetType.GetString();
+            var watch = Stopwatch.StartNew();
+            long waitMs = 0;
             object result;
             try
             {
-                result = await session.Trade!.ProcessAsync(packet, cancellationToken);
+                using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, shutdown.Token);
+                deadline.CancelAfter(TimeSpan.FromSeconds(Math.Max(1, session.Handshake.ExpiresAt - Now)));
+                var token = deadline.Token;
+                if (session.RecoveryOnly && type is not ("recover" or "close")) throw new InvalidOperationException("recovery_only_session");
+                using (await resources.Items.EnterAsync(session.Reservation, token))
+                lock (gate)
+                {
+                    RequireLive(session);
+                    if (type is not ("recover" or "close"))
+                    {
+                        if (reservations.TryGetValue(session.Reservation, out var holder) && holder != id)
+                        {
+                            if (session.Request.Operation != "cancel") throw new InvalidOperationException("item_busy");
+                            if (sessions.TryGetValue(holder, out var old)) { old.Revoked = true; Retire(old); }
+                        }
+                        reservations[session.Reservation] = id;
+                    }
+                }
+                using (var admission = CancellationTokenSource.CreateLinkedTokenSource(token))
+                {
+                    admission.CancelAfter(TimeSpan.FromSeconds(2));
+                    try { await session.Trade!.ReserveSignerAsync(type, admission.Token); }
+                    catch (OperationCanceledException) when (!token.IsCancellationRequested) { throw new CustodyCapacityException(); }
+                }
+                using var item = await resources.Items.EnterAsync(session.Reservation, token);
+                lock (gate) RequireLive(session);
+                if (type == "close") { session.Trade.Dispose(); result = new { type = "closed" }; }
+                else
+                {
+                    using var work = await resources.Work.EnterAsync(type is "sign" or "recover" || session.Request.Operation == "cancel", token);
+                    lock (gate) RequireLive(session);
+                    waitMs = watch.ElapsedMilliseconds;
+                    result = await session.Trade.ProcessAsync(packet, token);
+                    if (type is "sign" or "recover")
+                    {
+                        if (journal.Find(session.Request) is { } receipt)
+                        {
+                            settlement.Notify(receipt.KeyImage);
+                        }
+                    }
+                }
+                logger.LogInformation("Custody {Operation} stage {Stage}: wait {WaitMs} ms, processing {ProcessingMs} ms, total {ElapsedMs} ms",
+                    session.Request.Operation, type, waitMs, watch.ElapsedMilliseconds - waitMs, watch.ElapsedMilliseconds);
             }
             catch (Exception exception) when (exception is FormatException or InvalidOperationException or InvalidDataException or
-                CryptographicException or HttpRequestException or JsonException or KeyNotFoundException or OverflowException or TaskCanceledException)
+                CryptographicException or HttpRequestException or JsonException or KeyNotFoundException or OverflowException or OperationCanceledException or IOException)
             {
                 session.Trade!.Dispose();
-                if (reservations.GetValueOrDefault(session.Reservation) == id) reservations.Remove(session.Reservation);
-                var reason = exception.Message.All(c => c is >= 'a' and <= 'z' or '_') && exception.Message.Length <= 80
+                var reason = exception.Message.Length <= 80 && exception.Message.All(c => c is >= 'a' and <= 'z' or '_')
                     ? exception.Message : exception.GetType().Name;
-                logger.LogWarning("Custody {Operation} rejected: {Reason}", session.Request.Operation, reason);
-                result = new { type = "error", code = "trade_rejected" };
+                logger.LogWarning("Custody {Operation} stage {Stage} rejected after {ElapsedMs} ms: {Reason}", session.Request.Operation, type, watch.ElapsedMilliseconds, reason);
+                result = new { type = "error", code = reason is "item_busy" or "indexer_syncing" or "custody_busy" ? reason : "trade_rejected" };
             }
+            lock (gate) if (session.Completed && reservations.GetValueOrDefault(session.Reservation) == id) reservations.Remove(session.Reservation);
             var response = session.Encrypt(result, envelope.Sequence);
-            session.Sequence++;
-            session.LastRequest = envelope.Ciphertext; session.LastResponse = response;
+            session.Sequence++; session.LastRequest = envelope.Ciphertext; session.LastResponse = response;
             return response;
         }
-        finally { gate.Release(); }
+        finally
+        {
+            session.Processing.Release();
+            lock (gate) if (stopping || session.Revoked || session.Handshake.ExpiresAt <= Now) Retire(session);
+        }
     }
 
-    private void Sweep()
+    private void Retire(Session session)
     {
-        var now = clock.GetUtcNow().ToUnixTimeSeconds();
-        foreach (var session in sessions.Values.Where(s => s.Handshake.ExpiresAt <= now).ToArray())
+        if (!session.Processing.Wait(0)) return;
+        try
         {
             sessions.Remove(session.Handshake.SessionId);
             if (reservations.GetValueOrDefault(session.Reservation) == session.Handshake.SessionId) reservations.Remove(session.Reservation);
             session.Dispose();
         }
+        finally { session.Processing.Release(); }
+    }
+    private void Sweep()
+    {
+        foreach (var session in sessions.Values.Where(s => s.Revoked || s.Handshake.ExpiresAt <= Now).ToArray()) Retire(session);
     }
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(15), clock);
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5), clock);
+        var ticks = 0;
         try
         {
             while (await timer.WaitForNextTickAsync(stoppingToken))
             {
-                await gate.WaitAsync(stoppingToken);
-                try { Sweep(); } finally { gate.Release(); }
+                int active, retained;
+                lock (gate) { Sweep(); active = sessions.Values.Count(s => !s.Completed); retained = sessions.Count; }
+                if (++ticks % 6 == 0)
+                {
+                    var work = resources.Work.Snapshot(); var processes = resources.Signers.Snapshot();
+                    logger.LogInformation("Custody capacity: sessions {Active}/{Retained}, workers {Workers}, work waiting {Waiting}, signers {Signers}, signer waiting {SignerWaiting}",
+                        active, retained, work.Active, work.Waiting, processes.Active, processes.Waiting);
+                }
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
     }
     public override void Dispose()
     {
+        StopSessions();
         base.Dispose();
-        foreach (var session in sessions.Values) session.Dispose();
     }
-
+    private void StopSessions()
+    {
+        lock (gate) stopping = true;
+        shutdown.Cancel();
+        lock (gate) foreach (var session in sessions.Values.ToArray()) Retire(session);
+    }
+    public override async Task StopAsync(CancellationToken cancellationToken)
+    {
+        StopSessions();
+        await base.StopAsync(cancellationToken);
+    }
     private sealed class Session : IDisposable
     {
+        public SemaphoreSlim Processing { get; } = new(1, 1);
+        public bool Revoked { get; set; }
+        public bool RecoveryOnly { get; init; }
+        public bool Completed => Revoked || RecoveryOnly || Trade?.Completed == true;
         public CustodyOpen Request { get; }
         public CustodyHandshake Handshake { get; }
         public string Reservation { get; }
