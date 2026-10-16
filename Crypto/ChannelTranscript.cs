@@ -7,6 +7,10 @@ namespace MarketplaceCore.Crypto;
 
 public static class ChannelTranscript
 {
+    public static string Admission(MarketplaceOptions options, string role, string listingId, string owner, string nonce, long expiresAt)
+        => Digest("xtop/relay/admission/1", options.NetworkId, options.Id, options.PublicOrigin,
+            role, listingId, owner, nonce, expiresAt);
+
     public static string Authentication(MarketplaceOptions options, string owner, string nonce, long expiresAt)
         => Digest("xtop/relay/auth/1", options.NetworkId, options.Id, options.PublicOrigin,
             owner, nonce, expiresAt);

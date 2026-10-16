@@ -15,12 +15,13 @@ namespace MarketplaceCore.Controllers;
 [EnableRateLimiting("http")]
 [ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
 public sealed class CommunicationController(IListingDirectory listings, RelayState state,
-    IOptions<MarketplaceOptions> marketplace, IOptions<ChannelOptions> channels) : ControllerBase
+    IOptions<MarketplaceOptions> marketplace, IOptions<ChannelOptions> channels, TimeProvider clock, RelayAdmission admission) : ControllerBase
 {
     [HttpGet]
     public IActionResult Get() => Ok(new
     {
         protocolVersion = 1,
+        serverTime = clock.GetUtcNow().ToUnixTimeSeconds(),
         network = marketplace.Value.Network,
         networkId = marketplace.Value.NetworkId,
         marketplaceId = marketplace.Value.Id,
@@ -31,10 +32,33 @@ public sealed class CommunicationController(IListingDirectory listings, RelaySta
         heartbeatIntervalSeconds = 10,
         presenceTimeoutSeconds = channels.Value.PresenceTimeoutSeconds,
         acceptTimeoutSeconds = channels.Value.AcceptTimeoutSeconds,
-        lifetimeMinutes = channels.Value.LifetimeMinutes,
+        lifetimeMinutes = 5,
+        admissionRequired = true,
         maximumMessageBytes = channels.Value.MaximumMessageBytes,
         maximumMessages = channels.Value.MaximumMessages
     });
+
+    [HttpPost("admission")]
+    [EnableRateLimiting("admission")]
+    [RequestSizeLimit(4096)]
+    public async Task<IActionResult> Admit(AdmissionRequest request, CancellationToken token)
+    {
+        try { return Ok(await admission.Issue(request, token)); }
+        catch (RelayException e) { return StatusCode(403, new { error = e.Message }); }
+        catch (FormatException) { return BadRequest(new { error = "invalid_admission" }); }
+        catch (Exception e) when (DirectoryFailure(e)) { return StatusCode(503, new { error = "indexer_unavailable" }); }
+    }
+
+    [HttpGet("sellers/{ownerKey}/eligibility")]
+    public async Task<IActionResult> Eligibility(string ownerKey, CancellationToken token)
+    {
+        if (!OwnerSignature.IsOwner(ownerKey)) return BadRequest(new { error = "invalid_owner_key" });
+        try { return Ok(new { ownerKey, eligible = await listings.SellerAsync(ownerKey, token) != null }); }
+        catch (Exception e) when (DirectoryFailure(e)) { return StatusCode(503, new { error = "indexer_unavailable" }); }
+    }
+
+    private static bool DirectoryFailure(Exception e) => e is HttpRequestException or InvalidDataException or JsonException or TaskCanceledException ||
+        e is InvalidOperationException { Message: "indexer state unavailable" };
 
     [HttpGet("listings/{listingId}/availability")]
     public async Task<ActionResult<Availability>> Availability(string listingId, CancellationToken cancellationToken)

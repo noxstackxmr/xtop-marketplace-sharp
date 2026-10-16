@@ -18,9 +18,18 @@ public sealed class CustodyDirectory(HttpClient http, IOptions<MarketplaceOption
 
     public async Task<CustodyContext> GetAsync(string operation, string reference, string configHash, CancellationToken cancellationToken)
     {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(TimeSpan.FromSeconds(35));
+        try { return await ReadContextAsync(operation, reference, configHash, deadline.Token); }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && deadline.IsCancellationRequested)
+        { throw new InvalidOperationException("indexer_syncing"); }
+    }
+
+    private async Task<CustodyContext> ReadContextAsync(string operation, string reference, string configHash, CancellationToken cancellationToken)
+    {
         OwnerSignature.Hex(reference, 32); OwnerSignature.Hex(configHash, 32);
         if (operation is not ("list" or "cancel" or "purchase")) throw new FormatException("invalid operation");
-        for (var attempt = 0; attempt < 4; attempt++)
+        for (var attempt = 0; attempt <= 10; attempt++)
         {
             var itemRead = ReadAsync($"api/{(operation == "list" ? "items" : "listings")}/{reference}", cancellationToken);
             var marketRead = ReadAsync($"api/marketplaces/{options.Value.Id}?configHash={configHash}", cancellationToken);
@@ -31,7 +40,7 @@ public sealed class CustodyDirectory(HttpClient http, IOptions<MarketplaceOption
                 (operation == "list" ? item.Item?.ItemId : item.Listing?.Id) != reference) throw new InvalidDataException("indexer_identity_mismatch");
             if (item.ScannedTip != null && item.SpendCheckedTip == item.ScannedTip && market.ScannedTip == item.ScannedTip)
                 return new(item.Item, item.Listing, market.Marketplace, item.ScannedTip);
-            await Task.Delay(500, cancellationToken);
+            if (attempt < 10) await Task.Delay(3000, cancellationToken);
         }
         throw new InvalidOperationException("indexer_syncing");
     }

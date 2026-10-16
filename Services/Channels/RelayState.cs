@@ -16,14 +16,16 @@ public sealed class RelayState(IOptions<MarketplaceOptions> marketplace, IOption
     private ChannelOptions Settings => settings.Value;
     private long Now => clock.GetUtcNow().ToUnixTimeSeconds();
 
-    public void Connect(string connectionId, string ip, Action abort)
+    public void Connect(string connectionId, string ip, Action abort, AdmissionGrant grant)
     {
         lock (gate)
         {
             if (connections.Count >= Settings.MaximumConnections ||
                 connections.Values.Count(c => c.Ip == ip) >= Settings.MaximumConnectionsPerIp)
                 throw new RelayException("connection_limit");
-            connections.Add(connectionId, new Connection(ip, abort, Now));
+            if (connections.Values.Any(c => c.Grant.OwnerKey == grant.OwnerKey))
+                throw new RelayException("owner_connection_limit");
+            connections.Add(connectionId, new Connection(ip, abort, Now, grant));
         }
     }
 
@@ -47,6 +49,7 @@ public sealed class RelayState(IOptions<MarketplaceOptions> marketplace, IOption
         lock (gate)
         {
             var connection = GetConnection(connectionId);
+            if (connection.Grant.OwnerKey != ownerKey) throw new RelayException("admission_owner_mismatch");
             if (connection.Owner != null) throw new RelayException("already_authenticated");
             if (connection.Challenge != null)
             {
@@ -98,6 +101,7 @@ public sealed class RelayState(IOptions<MarketplaceOptions> marketplace, IOption
         lock (gate)
         {
             var connection = Authenticated(connectionId);
+            if (connection.Grant.Role != "seller") throw new RelayException("seller_listing_required");
             connection.LastHeartbeat = Now;
             connection.Ready = ready;
         }
@@ -106,6 +110,27 @@ public sealed class RelayState(IOptions<MarketplaceOptions> marketplace, IOption
     public bool IsOnline(string owner)
     {
         lock (gate) return SellerConnection(owner) != null;
+    }
+
+    public (string Id, string Owner)[] Sellers()
+    {
+        lock (gate) return connections.Where(p => p.Value.Grant.Role == "seller")
+            .Select(p => (p.Key, p.Value.Grant.OwnerKey)).ToArray();
+    }
+
+    public void RevokeSeller(string connectionId)
+    {
+        Action? abort;
+        lock (gate)
+        {
+            if (!connections.TryGetValue(connectionId, out var connection)) return;
+            // Keep an in-flight signature exchange alive until its existing deadline.
+            if (channels.Values.Any(c => c.Seller == connectionId && Usable(c))) return;
+            connection.Ready = false;
+            abort = connection.Abort;
+            connections.Remove(connectionId);
+        }
+        abort();
     }
 
     public string? ListingUnavailable(ListingState? listing)
@@ -126,6 +151,8 @@ public sealed class RelayState(IOptions<MarketplaceOptions> marketplace, IOption
         lock (gate)
         {
             var buyer = Authenticated(connectionId);
+            if (buyer.Grant.Role == "buyer" && buyer.Grant.ListingId != listing.Id)
+                throw new RelayException("admission_listing_mismatch");
             if (!Fresh(buyer)) throw new RelayException("heartbeat_required");
             var seller = SellerConnection(listing.SellerOwnerKey) ?? throw new RelayException("seller_offline");
             if (buyer.Owner == listing.SellerOwnerKey) throw new RelayException("same_participant");
@@ -134,7 +161,7 @@ public sealed class RelayState(IOptions<MarketplaceOptions> marketplace, IOption
                 throw new RelayException("channel_limit");
             var offer = new ChannelOffer(RandomHex(), listing.Id, listing.MarketplaceConfigHash,
                 Marketplace.NetworkId, Marketplace.Id, Marketplace.PublicOrigin, buyer.Owner!, listing.SellerOwnerKey,
-                encryptionKey, Now + Settings.LifetimeMinutes * 60, "");
+                encryptionKey, Math.Min(Now + 300, buyer.Grant.Role == "buyer" ? buyer.CreatedAt + 300 : long.MaxValue), "");
             offer = offer with { OfferHash = ChannelTranscript.Offer(offer) };
             channels.Add(offer.ChannelId, new Channel(offer, connectionId, seller, Now + Settings.AcceptTimeoutSeconds));
             return offer;
@@ -227,7 +254,7 @@ public sealed class RelayState(IOptions<MarketplaceOptions> marketplace, IOption
     {
         lock (gate)
         {
-            var dead = connections.Where(p => Now - p.Value.CreatedAt >= 28800 ||
+            var dead = connections.Where(p => BuyerExpired(p.Value) ||
                 (p.Value.Owner == null ? Now - p.Value.CreatedAt >= 120 : !Fresh(p.Value))).ToArray();
             foreach (var entry in dead) connections.Remove(entry.Key);
             var notifications = RemoveChannels(c => !Usable(c), "channel_expired");
@@ -255,11 +282,12 @@ public sealed class RelayState(IOptions<MarketplaceOptions> marketplace, IOption
     {
         var connection = GetConnection(id);
         if (connection.Owner == null) throw new RelayException("authentication_required");
-        if (!Fresh(connection) || Now - connection.CreatedAt >= 28800) throw new RelayException("connection_expired");
+        if (!Fresh(connection) || BuyerExpired(connection)) throw new RelayException("connection_expired");
         return connection;
     }
 
     private bool Fresh(Connection connection) => Now - connection.LastHeartbeat < Settings.PresenceTimeoutSeconds;
+    private bool BuyerExpired(Connection connection) => connection.Grant.Role == "buyer" && Now - connection.CreatedAt >= 300;
 
     private string? SellerConnection(string owner)
         => connections.FirstOrDefault(p => p.Value.Owner == owner && p.Value.Ready && Fresh(p.Value)).Key;
@@ -295,8 +323,9 @@ public sealed class RelayState(IOptions<MarketplaceOptions> marketplace, IOption
 
     private static string RandomHex() => Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32));
 
-    private sealed class Connection(string ip, Action abort, long createdAt)
+    private sealed class Connection(string ip, Action abort, long createdAt, AdmissionGrant grant)
     {
+        public AdmissionGrant Grant { get; } = grant;
         public string Ip { get; } = ip;
         public Action Abort { get; } = abort;
         public long CreatedAt { get; } = createdAt;

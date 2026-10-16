@@ -67,6 +67,7 @@ public static class MarketplaceApplication
             http.MaxResponseContentBufferSize = 131072;
         }).ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
         builder.Services.AddSingleton<RelayState>();
+        builder.Services.AddSingleton<RelayAdmission>();
         builder.Services.AddHostedService<ConnectionCleanup>();
         builder.Services.AddHttpClient<IListingDirectory, ListingDirectory>((services, http) =>
         {
@@ -111,6 +112,9 @@ public static class MarketplaceApplication
                 (context.Connection.RemoteIpAddress?.ToString() ?? "unknown") + (context.Request.Path.StartsWithSegments("/api/custody/sessions") ? ":trade" : ":read"),
                 _ => new FixedWindowRateLimiterOptions
                 { PermitLimit = context.RequestServices.GetRequiredService<IOptions<CustodyOptions>>().Value.HttpRequestsPerMinutePerIp, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
+            options.AddPolicy("admission", context => RateLimitPartition.GetFixedWindowLimiter(
+                context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                _ => new FixedWindowRateLimiterOptions { PermitLimit = 30, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
         });
         configure?.Invoke(builder);
         var app = builder.Build();
@@ -155,6 +159,21 @@ public static class MarketplaceApplication
                 policy.WithOrigins(marketplace.AllowedOrigins).WithMethods("GET", "POST").AllowAnyHeader();
         });
         app.UseRateLimiter();
+        app.Use(async (context, next) =>
+        {
+            if (context.Request.Path.StartsWithSegments("/hubs/communication"))
+            {
+                var grant = context.RequestServices.GetRequiredService<RelayAdmission>().Consume(context.Request.Query["ticket"].ToString());
+                if (grant == null)
+                {
+                    context.Response.StatusCode = 403;
+                    await context.Response.WriteAsJsonAsync(new { error = "admission_required" });
+                    return;
+                }
+                context.Items[RelayAdmission.ContextKey] = grant;
+            }
+            await next(context);
+        });
         app.MapControllers();
         app.MapHub<CommunicationHub>("/hubs/communication", options =>
         {

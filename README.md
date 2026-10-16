@@ -12,6 +12,8 @@ Run: `dotnet run`. HTTPS is required outside Development. Local HTTP: `dotnet ru
 | --- | --- | --- |
 | GET | `/api/communication` | Network, marketplace, protocol and channel limits |
 | GET | `/api/communication/listings/{listingId}/availability` | Listing eligibility and seller presence |
+| GET | `/api/communication/sellers/{ownerKey}/eligibility` | Whether this owner has an active client listing in this marketplace |
+| POST | `/api/communication/admission` | Verify signed owner/role/listing/nonce/expiry; issue a single-use, 30-second WebSocket ticket |
 | WebSocket | `/hubs/communication` | SignalR JSON protocol for authenticated key exchange and ciphertext relay |
 | GET | `/api/custody` | Custody mode, service public keys and address |
 | POST | `/api/custody/sessions` | Authenticate an item owner or buyer and establish an encrypted service session |

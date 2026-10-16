@@ -12,8 +12,10 @@ public sealed class CommunicationHub(RelayState state, IListingDirectory listing
         try
         {
             var context = Context;
+            var grant = context.GetHttpContext()?.Items[RelayAdmission.ContextKey] as AdmissionGrant
+                ?? throw new RelayException("admission_required");
             state.Connect(context.ConnectionId, context.GetHttpContext()?.Connection.RemoteIpAddress?.ToString() ?? "unknown",
-                context.Abort);
+                context.Abort, grant);
         }
         catch (RelayException) { Context.Abort(); }
         return base.OnConnectedAsync();
@@ -28,7 +30,13 @@ public sealed class CommunicationHub(RelayState state, IListingDirectory listing
 
     public AuthChallenge GetChallenge(string ownerKey) => state.Challenge(Context.ConnectionId, ownerKey);
     public void Authenticate(string signature) => state.Authenticate(Context.ConnectionId, signature);
-    public void SetReady(bool ready) => state.SetReady(Context.ConnectionId, ready);
+    public async Task SetReady(bool ready)
+    {
+        var owner = state.Owner(Context.ConnectionId);
+        if (ready && await listings.SellerAsync(owner, Context.ConnectionAborted) == null)
+            throw new RelayException("seller_listing_required");
+        state.SetReady(Context.ConnectionId, ready);
+    }
     public long Heartbeat() => state.Heartbeat(Context.ConnectionId);
 
     public async Task<ChannelOffer> PrepareChannel(string listingId, string buyerEncryptionKey)

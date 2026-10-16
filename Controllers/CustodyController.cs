@@ -15,10 +15,10 @@ namespace MarketplaceCore.Controllers;
 [EnableRateLimiting("http")]
 [RequestSizeLimit(400000)]
 [ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
-public sealed class CustodyController(CustodySessions sessions, CustodyKeys keys, IOptions<MarketplaceOptions> marketplace) : ControllerBase
+public sealed class CustodyController(CustodySessions sessions, CustodyKeys keys, IOptions<MarketplaceOptions> marketplace, TimeProvider clock) : ControllerBase
 {
     [HttpGet]
-    public IActionResult Get() => Ok(new { protocolVersion = 1, enabled = keys.Enabled, network = marketplace.Value.Network,
+    public IActionResult Get() => Ok(new { protocolVersion = 1, serverTime = clock.GetUtcNow().ToUnixTimeSeconds(), enabled = keys.Enabled, network = marketplace.Value.Network,
         networkId = marketplace.Value.NetworkId, marketplaceId = marketplace.Value.Id, origin = marketplace.Value.PublicOrigin,
         mode = "marketplace", automaticSubmission = true, ownerKey = keys.Enabled ? Convert.ToHexStringLower(keys.Owner) : null,
         address = keys.Enabled ? CustodyAddress.From(keys.Address) : null, cipherSuite = "P256-HKDF-SHA256-AES256GCM" });
